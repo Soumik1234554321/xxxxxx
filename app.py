@@ -11,10 +11,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv()
 
 # ==========================================
 # CONFIGURATION
@@ -24,12 +20,12 @@ class Config:
     """Application configuration"""
     GMAIL_EMAIL = os.getenv('GMAIL_EMAIL', 'sgexploits@gmail.com')
     GMAIL_APP_PASSWORD = os.getenv('GMAIL_APP_PASSWORD', 'clraykmizipllrgs')
-    VERIFICATION_TOKEN_EXPIRY_HOURS = 24  # Fixed 24 hours expiry
+    VERIFICATION_TOKEN_EXPIRY_HOURS = 24
     SMTP_SERVER = 'smtp.gmail.com'
     SMTP_PORT = 587
     COMPANY_NAME = "SG EXPLOITS"
     COMPANY_LOGO_URL = "https://i.ibb.co/wNvw1Fsm/IMG-20260319-205918.jpg"
-    JSON_FILE_PATH = '/tmp/users.json'  # Use /tmp for Vercel serverless
+    JSON_FILE_PATH = '/tmp/users.json'
 
 config = Config()
 
@@ -58,7 +54,7 @@ class JSONStorage:
         """Create JSON file if it doesn't exist"""
         if not os.path.exists(self.file_path):
             with open(self.file_path, 'w') as f:
-                json.dump({}, f, indent=2)
+                json.dump({}, f)
             logger.info(f"Created {self.file_path}")
     
     def _read_data(self) -> Dict:
@@ -72,7 +68,7 @@ class JSONStorage:
     def _write_data(self, data: Dict):
         """Write data to JSON file"""
         with open(self.file_path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(data, f, default=str)
     
     def get_user(self, email: str) -> Optional[Dict]:
         """Get user data by email"""
@@ -86,14 +82,6 @@ class JSONStorage:
         self._write_data(data)
         logger.info(f"User data saved for {email}")
     
-    def delete_user(self, email: str):
-        """Delete user data"""
-        data = self._read_data()
-        if email in data:
-            del data[email]
-            self._write_data(data)
-            logger.info(f"User data deleted for {email}")
-    
     def get_all_users(self) -> Dict:
         """Get all users data"""
         return self._read_data()
@@ -106,16 +94,18 @@ class JSONStorage:
         
         for email, user_data in list(data.items()):
             if 'token' in user_data and 'token_expires_at' in user_data:
-                expires_at = datetime.fromisoformat(user_data['token_expires_at'])
-                if expires_at < now and not user_data.get('verified', False):
-                    user_data['token'] = None
-                    user_data['token_expires_at'] = None
-                    user_data['token_created_at'] = None
-                    modified = True
+                try:
+                    expires_at = datetime.fromisoformat(user_data['token_expires_at'])
+                    if expires_at < now and not user_data.get('verified', False):
+                        user_data['token'] = None
+                        user_data['token_expires_at'] = None
+                        user_data['token_created_at'] = None
+                        modified = True
+                except:
+                    pass
         
         if modified:
             self._write_data(data)
-            logger.info("Cleaned up expired tokens")
 
 # Initialize JSON storage
 db = JSONStorage(config.JSON_FILE_PATH)
@@ -328,10 +318,6 @@ def send_verification_email(recipient: str, verification_link: str) -> Tuple[boo
         msg['From'] = f"{config.COMPANY_NAME} <{config.GMAIL_EMAIL}>"
         msg['To'] = recipient
         msg['Subject'] = f"Verify Your Email - {config.COMPANY_NAME}"
-        msg['X-MC-GoogleAnalytics'] = 'no'
-        msg['X-Entity-Ref-ID'] = secrets.token_urlsafe(16)
-        msg['Auto-Submitted'] = 'auto-generated'
-        msg['Precedence'] = 'bulk'
         
         plain_text = f"""{config.COMPANY_NAME} - Email Verification
 
@@ -371,9 +357,13 @@ This link expires in {config.VERIFICATION_TOKEN_EXPIRY_HOURS} hours and can only
 app = Flask(__name__)
 CORS(app)
 
+# Cleanup expired tokens
 @app.before_request
 def cleanup():
-    db.cleanup_expired()
+    try:
+        db.cleanup_expired()
+    except:
+        pass
 
 # ==========================================
 # API ENDPOINTS
@@ -381,277 +371,303 @@ def cleanup():
 
 @app.route('/send=<email>', methods=['GET'])
 def send_verification_link(email):
-    valid, result = validate_email(email)
-    if not valid:
-        return jsonify({
-            'success': False,
-            'message': result,
-            'timestamp': datetime.now().isoformat()
-        }), 400
-    
-    email = result
-    user_data = db.get_user(email)
-    
-    if user_data and user_data.get('verified', False):
-        return jsonify({
-            'success': False,
-            'message': 'Email already verified',
-            'data': {
+    try:
+        valid, result = validate_email(email)
+        if not valid:
+            return jsonify({
+                'success': False,
+                'message': result,
+                'timestamp': datetime.now().isoformat()
+            }), 400
+        
+        email = result
+        user_data = db.get_user(email)
+        
+        if user_data and user_data.get('verified', False):
+            return jsonify({
+                'success': False,
+                'message': 'Email already verified',
+                'data': {
+                    'email': email,
+                    'verified': True,
+                    'verified_at': user_data.get('verified_at')
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 400
+        
+        token = generate_verification_token()
+        expires_at = datetime.now() + timedelta(hours=24)
+        base_url = get_base_url()
+        verification_link = f"{base_url}/verify/confirm/{token}"
+        
+        if not user_data:
+            user_data = {
                 'email': email,
-                'verified': True,
-                'verified_at': user_data.get('verified_at')
-            },
-            'timestamp': datetime.now().isoformat()
-        }), 400
-    
-    token = generate_verification_token()
-    expires_at = datetime.now() + timedelta(hours=24)
-    base_url = get_base_url()
-    verification_link = f"{base_url}/verify/confirm/{token}"
-    
-    if not user_data:
-        user_data = {
-            'email': email,
-            'verified': False,
-            'created_at': datetime.now().isoformat(),
-            'token': token,
-            'token_created_at': datetime.now().isoformat(),
-            'token_expires_at': expires_at.isoformat(),
-            'verification_link_sent_count': 1,
-            'last_verification_sent': datetime.now().isoformat()
-        }
-    else:
-        user_data['token'] = token
-        user_data['token_created_at'] = datetime.now().isoformat()
-        user_data['token_expires_at'] = expires_at.isoformat()
-        user_data['verification_link_sent_count'] = user_data.get('verification_link_sent_count', 0) + 1
-        user_data['last_verification_sent'] = datetime.now().isoformat()
-    
-    db.save_user(email, user_data)
-    success, message = send_verification_email(email, verification_link)
-    
-    if success:
-        return jsonify({
-            'success': True,
-            'message': f'Verification link sent to {email}',
-            'data': {
-                'email': email,
-                'expires_in_hours': 24,
-                'expires_at': expires_at.isoformat(),
-                'verification_link': verification_link
-            },
-            'timestamp': datetime.now().isoformat()
-        }), 200
-    else:
-        user_data['token'] = None
+                'verified': False,
+                'created_at': datetime.now().isoformat(),
+                'token': token,
+                'token_created_at': datetime.now().isoformat(),
+                'token_expires_at': expires_at.isoformat(),
+                'verification_link_sent_count': 1,
+                'last_verification_sent': datetime.now().isoformat()
+            }
+        else:
+            user_data['token'] = token
+            user_data['token_created_at'] = datetime.now().isoformat()
+            user_data['token_expires_at'] = expires_at.isoformat()
+            user_data['verification_link_sent_count'] = user_data.get('verification_link_sent_count', 0) + 1
+            user_data['last_verification_sent'] = datetime.now().isoformat()
+        
         db.save_user(email, user_data)
+        success, message = send_verification_email(email, verification_link)
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': f'Verification link sent to {email}',
+                'data': {
+                    'email': email,
+                    'expires_in_hours': 24,
+                    'expires_at': expires_at.isoformat(),
+                    'verification_link': verification_link
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 200
+        else:
+            user_data['token'] = None
+            db.save_user(email, user_data)
+            return jsonify({
+                'success': False,
+                'message': message,
+                'timestamp': datetime.now().isoformat()
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in send_verification_link: {str(e)}")
         return jsonify({
             'success': False,
-            'message': message,
+            'message': f"Internal error: {str(e)}",
             'timestamp': datetime.now().isoformat()
         }), 500
 
 @app.route('/verify/confirm/<token>', methods=['GET'])
 def confirm_verification(token):
-    all_users = db.get_all_users()
-    email = None
-    user_data = None
-    
-    for user_email, data in all_users.items():
-        if data.get('token') == token:
-            email = user_email
-            user_data = data
-            break
-    
-    if not email or not user_data:
+    try:
+        all_users = db.get_all_users()
+        email = None
+        user_data = None
+        
+        for user_email, data in all_users.items():
+            if data.get('token') == token:
+                email = user_email
+                user_data = data
+                break
+        
+        if not email or not user_data:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid or expired verification link',
+                'timestamp': datetime.now().isoformat()
+            }), 404
+        
+        if user_data.get('verified', False):
+            return jsonify({
+                'success': False,
+                'message': 'Email already verified',
+                'data': {
+                    'email': email,
+                    'verified': True,
+                    'verified_at': user_data.get('verified_at')
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 400
+        
+        if 'token_expires_at' in user_data:
+            expires_at = datetime.fromisoformat(user_data['token_expires_at'])
+            if datetime.now() > expires_at:
+                return jsonify({
+                    'success': False,
+                    'message': 'Verification link has expired (24 hours). Please request a new one',
+                    'timestamp': datetime.now().isoformat()
+                }), 410
+        
+        user_data['verified'] = True
+        user_data['verified_at'] = datetime.now().isoformat()
+        user_data['token'] = None
+        db.save_user(email, user_data)
+        
         return jsonify({
-            'success': False,
-            'message': 'Invalid or expired verification link',
-            'timestamp': datetime.now().isoformat()
-        }), 404
-    
-    if user_data.get('verified', False):
-        return jsonify({
-            'success': False,
-            'message': 'Email already verified',
+            'success': True,
+            'message': 'Email verified successfully!',
             'data': {
                 'email': email,
                 'verified': True,
-                'verified_at': user_data.get('verified_at')
+                'verified_at': user_data['verified_at']
             },
             'timestamp': datetime.now().isoformat()
-        }), 400
-    
-    if 'token_expires_at' in user_data:
-        expires_at = datetime.fromisoformat(user_data['token_expires_at'])
-        if datetime.now() > expires_at:
-            return jsonify({
-                'success': False,
-                'message': 'Verification link has expired (24 hours). Please request a new one',
-                'timestamp': datetime.now().isoformat()
-            }), 410
-    
-    user_data['verified'] = True
-    user_data['verified_at'] = datetime.now().isoformat()
-    user_data['token'] = None
-    db.save_user(email, user_data)
-    
-    return jsonify({
-        'success': True,
-        'message': 'Email verified successfully!',
-        'data': {
-            'email': email,
-            'verified': True,
-            'verified_at': user_data['verified_at']
-        },
-        'timestamp': datetime.now().isoformat()
-    }), 200
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in confirm_verification: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f"Internal error: {str(e)}",
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/verified/check=<email>', methods=['GET'])
 def check_verification(email):
-    valid, result = validate_email(email)
-    if not valid:
+    try:
+        valid, result = validate_email(email)
+        if not valid:
+            return jsonify({
+                'success': False,
+                'message': result,
+                'timestamp': datetime.now().isoformat()
+            }), 400
+        
+        email = result
+        user_data = db.get_user(email)
+        
+        if not user_data:
+            return jsonify({
+                'success': True,
+                'verified': False,
+                'message': 'Email not found in system',
+                'data': {
+                    'email': email,
+                    'verified': False,
+                    'exists': False
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 200
+        
+        is_verified = user_data.get('verified', False)
+        
+        if is_verified:
+            return jsonify({
+                'success': True,
+                'verified': True,
+                'message': 'Email is verified',
+                'data': {
+                    'email': email,
+                    'verified': True,
+                    'verified_at': user_data.get('verified_at'),
+                    'created_at': user_data.get('created_at')
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 200
+        else:
+            has_valid_token = False
+            expires_in_hours = None
+            
+            if 'token_expires_at' in user_data and user_data.get('token'):
+                try:
+                    expires_at = datetime.fromisoformat(user_data['token_expires_at'])
+                    if datetime.now() < expires_at:
+                        has_valid_token = True
+                        remaining = (expires_at - datetime.now()).total_seconds() / 3600
+                        expires_in_hours = round(remaining, 1)
+                except:
+                    pass
+            
+            return jsonify({
+                'success': True,
+                'verified': False,
+                'message': 'Email not verified yet',
+                'data': {
+                    'email': email,
+                    'verified': False,
+                    'has_pending_verification': has_valid_token,
+                    'expires_in_hours': expires_in_hours,
+                    'verification_sent_count': user_data.get('verification_link_sent_count', 0),
+                    'last_verification_sent': user_data.get('last_verification_sent'),
+                    'created_at': user_data.get('created_at')
+                },
+                'timestamp': datetime.now().isoformat()
+            }), 200
+    except Exception as e:
+        logger.error(f"Error in check_verification: {str(e)}")
         return jsonify({
             'success': False,
-            'message': result,
+            'message': f"Internal error: {str(e)}",
             'timestamp': datetime.now().isoformat()
-        }), 400
-    
-    email = result
-    user_data = db.get_user(email)
-    
-    if not user_data:
-        return jsonify({
-            'success': True,
-            'verified': False,
-            'message': 'Email not found in system',
-            'data': {
-                'email': email,
-                'verified': False,
-                'exists': False
-            },
-            'timestamp': datetime.now().isoformat()
-        }), 200
-    
-    is_verified = user_data.get('verified', False)
-    
-    if is_verified:
-        return jsonify({
-            'success': True,
-            'verified': True,
-            'message': 'Email is verified',
-            'data': {
-                'email': email,
-                'verified': True,
-                'verified_at': user_data.get('verified_at'),
-                'created_at': user_data.get('created_at')
-            },
-            'timestamp': datetime.now().isoformat()
-        }), 200
-    else:
-        has_valid_token = False
-        expires_in_hours = None
-        
-        if 'token_expires_at' in user_data and user_data.get('token'):
-            expires_at = datetime.fromisoformat(user_data['token_expires_at'])
-            if datetime.now() < expires_at:
-                has_valid_token = True
-                remaining = (expires_at - datetime.now()).total_seconds() / 3600
-                expires_in_hours = round(remaining, 1)
-        
-        return jsonify({
-            'success': True,
-            'verified': False,
-            'message': 'Email not verified yet',
-            'data': {
-                'email': email,
-                'verified': False,
-                'has_pending_verification': has_valid_token,
-                'expires_in_hours': expires_in_hours,
-                'verification_sent_count': user_data.get('verification_link_sent_count', 0),
-                'last_verification_sent': user_data.get('last_verification_sent'),
-                'created_at': user_data.get('created_at')
-            },
-            'timestamp': datetime.now().isoformat()
-        }), 200
+        }), 500
 
 @app.route('/users', methods=['GET'])
 def get_all_users():
-    all_users = db.get_all_users()
-    
-    for email, user_data in all_users.items():
-        if 'token' in user_data:
-            user_data['token'] = '***HIDDEN***'
-    
-    return jsonify({
-        'success': True,
-        'total_users': len(all_users),
-        'users': all_users,
-        'timestamp': datetime.now().isoformat()
-    }), 200
+    try:
+        all_users = db.get_all_users()
+        
+        for email, user_data in all_users.items():
+            if 'token' in user_data:
+                user_data['token'] = '***HIDDEN***'
+        
+        return jsonify({
+            'success': True,
+            'total_users': len(all_users),
+            'users': all_users,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in get_all_users: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f"Internal error: {str(e)}",
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/', methods=['GET'])
 def home():
-    base_url = get_base_url()
-    return jsonify({
-        'name': f'{config.COMPANY_NAME} - Premium Email Verification API',
-        'version': '6.0.0',
-        'description': 'Clean, mobile-optimized email verification with 24-hour expiry',
-        'base_url': base_url,
-        'verification_expiry': '24 hours',
-        'endpoints': {
-            'send_verification_link': {
-                'url': f'{base_url}/send={{email}}',
-                'method': 'GET',
-                'example': f'{base_url}/send=user@gmail.com',
-                'description': 'Send verification link to email'
+    try:
+        base_url = get_base_url()
+        return jsonify({
+            'name': f'{config.COMPANY_NAME} - Premium Email Verification API',
+            'version': '6.0.0',
+            'description': 'Clean, mobile-optimized email verification with 24-hour expiry',
+            'base_url': base_url,
+            'verification_expiry': '24 hours',
+            'endpoints': {
+                'send_verification_link': {
+                    'url': f'{base_url}/send={{email}}',
+                    'method': 'GET',
+                    'example': f'{base_url}/send=user@gmail.com',
+                    'description': 'Send verification link to email'
+                },
+                'check_verification_status': {
+                    'url': f'{base_url}/verified/check={{email}}',
+                    'method': 'GET',
+                    'example': f'{base_url}/verified/check=user@gmail.com',
+                    'description': 'Check if email is verified'
+                },
+                'get_all_users': {
+                    'url': f'{base_url}/users',
+                    'method': 'GET',
+                    'description': 'Get all users data'
+                }
             },
-            'check_verification_status': {
-                'url': f'{base_url}/verified/check={{email}}',
-                'method': 'GET',
-                'example': f'{base_url}/verified/check=user@gmail.com',
-                'description': 'Check if email is verified'
+            'email_template_features': {
+                'design': 'Clean & Minimal',
+                'mobile_optimized': True,
+                'max_width': '450px',
+                'red_verification_button': True,
+                'no_quoted_text': True,
+                'no_security_warning': True,
+                'responsive': True,
+                'auto_base_url': True
             },
-            'get_all_users': {
-                'url': f'{base_url}/users',
-                'method': 'GET',
-                'description': 'Get all users data'
-            }
-        },
-        'email_template_features': {
-            'design': 'Clean & Minimal',
-            'mobile_optimized': True,
-            'max_width': '450px',
-            'red_verification_button': True,
-            'no_quoted_text': True,
-            'no_security_warning': True,
-            'responsive': True,
-            'auto_base_url': True
-        },
-        'timestamp': datetime.now().isoformat()
-    })
+            'timestamp': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f"Internal error: {str(e)}",
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'success': False,
-        'message': 'Endpoint not found. Use /send={email} or /verified/check={email}',
-        'timestamp': datetime.now().isoformat()
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'message': 'Internal server error',
-        'timestamp': datetime.now().isoformat()
-    }), 500
-
-# For Vercel serverless deployment
+# This is required for Vercel
 app.debug = False
 
 # ==========================================
-# MAIN ENTRY POINT
+# MAIN ENTRY POINT (for local testing only)
 # ==========================================
 
 if __name__ == '__main__':
@@ -661,7 +677,6 @@ if __name__ == '__main__':
     print(f"\n✅ Server running on: http://localhost:5000")
     print(f"✅ Verification Expiry: 24 HOURS")
     print(f"✅ JSON Storage: {config.JSON_FILE_PATH}")
-    print(f"✅ AUTO BASE URL DETECTION: ENABLED")
     print("\n" + "="*70 + "\n")
     
     app.run(
